@@ -3,7 +3,7 @@ build-backend = "setuptools.build_meta"
 requires = [ "setuptools>=64", "setuptools-scm>=8" ]
 
 [project]
-name = "serpula_rasa"
+name = "serpula-rasa"
 version = "0.0.1"
 description = "Blank snake implementation prototype for image-based single-cell profiling"
 readme = "README.md"
@@ -18,20 +18,20 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-  "pandas>=2.2.3",
   "black>=25.1",
+  "cellpose>=4.0.6",
+  "cp-measure>=0.1.11",
   "isort>=6.0.1",
   "jupyterlab>=4.4.2",
   "jupyterlab-code-formatter>=3.0.2",
   "jupytext>=1.17.1",
-  "cp-measure>=0.1.11",
-  "cellpose>=4.0.6",
-  "scikit-image>=0.24.0",
-  "opencv-python-headless>=4.11.0.86",
-  "pyarrow>=21.0.0",
   "lancedb>=0.24.2",
-  "numpy>=1.26.4",
   "matplotlib>=3.10.5",
+  "numpy>=1.26.4",
+  "opencv-python-headless>=4.11.0.86",
+  "pandas>=2.2.3",
+  "pyarrow>=21",
+  "scikit-image>=0.24",
 ]
 
 [tool.setuptools_scm]
@@ -67,8 +67,10 @@ lint.select = [
   "SIM",
   "W",
 ]
+lint.per-file-ignores."src/serpula_rasa/example.ipynb" = [ "PLR2004" ]
+
 # Ignore `F401` (unused imports) for `__init__.py` file
-lint.per-file-ignores."__init__.py" = [ "F401" ]
+lint.per-file-ignores."src/serpula_rasa/example.py" = [ "PLR2004" ]
 
 [tool.pytest.ini_options]
 pythonpath = [ "." ]
@@ -87,4 +89,4 @@ formats = "ipynb,py:light"
 
 [tool.vulture]
 min_confidence = 90
-paths = [ "src/serpula_rasa"]
+paths = [ "src/serpula_rasa" ]

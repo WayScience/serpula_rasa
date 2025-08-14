@@ -14,7 +14,8 @@
 
 # # Example Pythonic image-based single-cell profiling
 #
-# The following is an example of performing image-based single-cell profiling using Python tools without leaving the kernel for GUI-based interaction.
+# The following is an example of performing image-based single-cell profiling using
+# Python tools without leaving the kernel for GUI-based interaction.
 #
 # - load ExampleHuman images from the CellProfiler/examples repo
 # - segment nuclei with Cellpose (v3 or v4)
@@ -37,6 +38,7 @@ from pprint import pp
 from shutil import copy2, copytree
 from typing import Dict, List, Tuple
 
+import cellpose
 import imageio.v3 as iio
 import lancedb
 import matplotlib.pyplot as plt
@@ -74,7 +76,6 @@ if pathlib.Path(LANCE_DIR).is_dir():
 # +
 # if we don't have the data already, create it
 if not pathlib.Path(DEST_DIR).exists():
-
     DEST_DIR.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -94,6 +95,13 @@ if not pathlib.Path(DEST_DIR).exists():
                 copy2(entry, target)
 
 pp(list(pathlib.Path(DEST_DIR).rglob("*")))
+# -
+
+type(
+    lancedb.connect(LANCE_DIR).create_table(
+        "something", pd.DataFrame({"sometiing": [12]})
+    )
+)
 
 # +
 # create functions which can help us run the pipeline
@@ -132,7 +140,9 @@ def list_images(root: Path) -> List[Path]:
 # ---------- LanceDB helpers (lazy creation, schema-safe) ----------
 
 
-def get_or_create_table(db, table_name: str, df_first_batch: pd.DataFrame):
+def get_or_create_table(
+    db: lancedb.db.LanceDBConnection, table_name: str, df_first_batch: pd.DataFrame
+) -> lancedb.table.LanceTable:
     """
     Lazily create (or safely recreate) a table from the first batch df.
     If an incompatible table exists, drop and recreate with the new schema.
@@ -152,10 +162,12 @@ def get_or_create_table(db, table_name: str, df_first_batch: pd.DataFrame):
         return db.create_table(table_name, df_first_batch)
 
 
-def ensure_log_table(db, name: str):
+def ensure_log_table(
+    db: lancedb.db.LanceDBConnection, name: str
+) -> lancedb.table.LanceTable:
     names = set(db.table_names())
     if name not in names:
-        db.create_table(
+        return db.create_table(
             name, pd.DataFrame([{"image": "", "status": "", "n_objects": 0}])
         ).delete("n_objects == 0")
 
@@ -163,7 +175,7 @@ def ensure_log_table(db, name: str):
 # ---------- Cellpose v3/v4 compatibility ----------
 
 
-def make_cellpose_model(model_type: str, gpu: bool):
+def make_cellpose_model(model_type: str, gpu: bool) -> cellpose.models.CellposeModel:
     """
     Return a Cellpose model instance that works with Cellpose v3 or v4.
     """
@@ -183,7 +195,9 @@ def make_cellpose_model(model_type: str, gpu: bool):
 
 
 def cellpose_eval(
-    model, img_f: np.ndarray, channels=(0, 0)
+    model: cellpose.models.CellposeModel,
+    img_f: np.ndarray,
+    channels: Tuple[int, int] = (0, 0),
 ) -> Tuple[np.ndarray, float]:
     """
     Run model.eval and return (masks, diams_scalar).
@@ -228,21 +242,17 @@ def cellpose_eval(
     return masks, diam_scalar
 
 
-def main():
+def main() -> None:  # noqa: PLR0915, C901
     # Connect LanceDB + ensure log table
     db = lancedb.connect(str(LANCE_DIR))
     ensure_log_table(db, TABLE_LOG)
     log_tbl = db.open_table(TABLE_LOG)
 
-    # Defer table creation until we have first real batches
-    tbl_features = None
-    tbl_images = None
-    tbl_masks = None
-
     # Init Cellpose (v3 or v4)
     model = make_cellpose_model(MODEL_TYPE, GPU)
 
-    # cp_measure measurement functions (intensity, size/shape, texture, zernike, granularity, radial, etc.)
+    # cp_measure measurement functions (intensity, size/shape,
+    # texture, zernike, granularity, radial, etc.)
     measurements = get_core_measurements()
 
     images = list_images(IMAGES_DIR)
@@ -256,8 +266,10 @@ def main():
             file_shape = tuple(img.shape)
             file_dtype = str(img.dtype)
 
-            # If multichannel (H,W,C), pick the first channel for minimal demo storage/seg
-            if img.ndim == 3 and img.shape[-1] in (2, 3, 4):
+            # If multichannel (H,W,C), pick the first channel
+            # for minimal demo storage/seg
+            dims = 3
+            if img.ndim == dims and img.shape[-1] in (2, 3, 4):
                 nuc_img = img[..., 0]
                 stored_channels = 1
             else:
@@ -281,7 +293,7 @@ def main():
                 ]
             )
 
-            tbl_images = get_or_create_table(db, TABLE_IMAGES, img_record)
+            get_or_create_table(db, TABLE_IMAGES, img_record)
 
             # --- prepare float image for segmentation & features ---
             img_f = to_float01(nuc_img)
@@ -313,7 +325,7 @@ def main():
                 ]
             )
 
-            tbl_masks = get_or_create_table(db, TABLE_MASKS, mask_record)
+            get_or_create_table(db, TABLE_MASKS, mask_record)
 
             # --- compute cp_measure features ---
             if n_obj < MIN_OBJECTS_TO_SAVE:
@@ -356,7 +368,7 @@ def main():
 
             df_features = pd.DataFrame(rows)
 
-            tbl_features = get_or_create_table(db, TABLE_FEATURES, df_features)
+            get_or_create_table(db, TABLE_FEATURES, df_features)
 
             log_tbl.add([{"image": str(img_path), "status": "ok", "n_objects": n_obj}])
             print(f"✓ {img_path.name}: {n_obj} objects")

@@ -8,8 +8,8 @@ message: >-
   metadata from the CITATION.cff file.
 type: software
 authors:
-  - given-names: d33bs
-    family-names: 
+  - given-names: Dave
+    family-names: Bunten
     orcid: "https://orcid.org/0000-0001-6041-3665"
 repository-code: "https://github.com/d33bs/serpula_rasa"
 abstract: >-
