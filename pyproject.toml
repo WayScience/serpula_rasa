@@ -67,10 +67,8 @@ lint.select = [
   "SIM",
   "W",
 ]
-lint.per-file-ignores."src/serpula_rasa/example.ipynb" = [ "PLR2004" ]
-
-# Ignore `F401` (unused imports) for `__init__.py` file
-lint.per-file-ignores."src/serpula_rasa/example.py" = [ "PLR2004" ]
+lint.per-file-ignores."src/serpula_rasa/example.ipynb" = [ "PLR2004", "RUF059" ]
+lint.per-file-ignores."src/serpula_rasa/example.py" = [ "PLR2004", "RUF059" ]
 
 [tool.pytest.ini_options]
 pythonpath = [ "." ]
