@@ -45,6 +45,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from cellpose import models as cp_models
+from serpula_rasa.image import ingest_ome_images_ome_arrow, show_images_from_lance
 
 try:
     from cellpose import version as CP_VERSION
@@ -62,7 +63,7 @@ LANCE_DIR = Path("./data/lance_db")
 TABLE_FEATURES = "compartment_nuclei"
 TABLE_LOG = "run_log"
 TABLE_IMAGES = "images"
-TABLE_MASKS = "masks"
+TABLE_MASKS = "images"
 
 MODEL_TYPE = "nuclei"  # Cellpose pretrained nuclei model
 GPU = True  # set True if you have CUDA ready
@@ -95,13 +96,6 @@ if not pathlib.Path(DEST_DIR).exists():
                 copy2(entry, target)
 
 pp(list(pathlib.Path(DEST_DIR).rglob("*")))
-# -
-
-type(
-    lancedb.connect(LANCE_DIR).create_table(
-        "something", pd.DataFrame({"sometiing": [12]})
-    )
-)
 
 # +
 # create functions which can help us run the pipeline
@@ -242,147 +236,98 @@ def cellpose_eval(
     return masks, diam_scalar
 
 
-def main() -> None:  # noqa: PLR0915, C901
+def gather_profiles() -> None:  # noqa: PLR0915, C901
     # Connect LanceDB + ensure log table
     db = lancedb.connect(str(LANCE_DIR))
     ensure_log_table(db, TABLE_LOG)
     log_tbl = db.open_table(TABLE_LOG)
 
-    # Init Cellpose (v3 or v4)
+    # Init Cellpose (v3 or v4) + measurement funcs
     model = make_cellpose_model(MODEL_TYPE, GPU)
-
-    # cp_measure measurement functions (intensity, size/shape,
-    # texture, zernike, granularity, radial, etc.)
     measurements = get_core_measurements()
 
     images = list_images(IMAGES_DIR)
     if not images:
         raise SystemExit(f"No images found under: {IMAGES_DIR.resolve()}")
 
+    ome_tbl = ingest_ome_images_ome_arrow(
+        db=db,
+        col_name="ome-arrow_original",
+        table_name=TABLE_IMAGES,            # reuse TABLE_IMAGES name
+        image_paths=images,            # demo: first image only
+        prefer_dimension_order_xyzct=False, # 2D → "XYCT" hint
+    )
+    print(f"[ome-arrow] stored {ome_tbl.count_rows()} image(s) in Lance")
+
     for img_path in [images[0]]:
         try:
-            # --- read & (optionally) select nuclei channel ---
             img = iio.imread(img_path)
-            file_shape = tuple(img.shape)
-            file_dtype = str(img.dtype)
-
-            # If multichannel (H,W,C), pick the first channel
-            # for minimal demo storage/seg
-            dims = 3
-            if img.ndim == dims and img.shape[-1] in (2, 3, 4):
+            # match the ingestion’s channel handling
+            if img.ndim == 3 and img.shape[-1] in (2, 3, 4):
                 nuc_img = img[..., 0]
-                stored_channels = 1
             else:
                 nuc_img = img
-                stored_channels = 1  # demo stores single-channel images
 
-            # --- store raw image as flattened list into images_raw ---
-            img_record = pd.DataFrame(
-                [
-                    {
-                        "filename": img_path.name,
-                        "height": int(nuc_img.shape[0]),
-                        "width": int(nuc_img.shape[1]),
-                        "channels": int(stored_channels),
-                        "dtype": str(nuc_img.dtype),
-                        "image": ndarray_to_list(nuc_img),  # <— list column
-                        # provenance about original file before channel selection
-                        "file_shape": str(file_shape),
-                        "file_dtype": file_dtype,
-                    }
-                ]
-            )
-
-            get_or_create_table(db, TABLE_IMAGES, img_record)
-
-            # --- prepare float image for segmentation & features ---
             img_f = to_float01(nuc_img)
 
-            # --- segment ---
+            # segment
             masks, diams = cellpose_eval(model, img_f, channels=CHANNELS)
 
-            # --- store mask as flattened list with lineage into masks table ---
-            labels = np.unique(masks)
-            labels = labels[labels > 0]
+            # store masks (kept as flattened ints in existing table)
+            labels = np.unique(masks); labels = labels[labels > 0]
             n_obj = int(labels.size)
-
-            mask_record = pd.DataFrame(
-                [
-                    {
-                        "filename": img_path.name,
-                        "algo_name": "cellpose",
-                        "algo_version": CP_VERSION,
-                        "model_type": MODEL_TYPE,
-                        "channels": str(CHANNELS),
-                        "n_objects": n_obj,
-                        "height": int(masks.shape[0]),
-                        "width": int(masks.shape[1]),
-                        "dtype": "int32",
-                        "image": ndarray_to_list(
-                            masks.astype(np.int32, copy=False)
-                        ),  # <— list column
-                    }
-                ]
-            )
-
+            mask_record = pd.DataFrame([{
+                "filename": img_path.name,
+                "algo_name": "cellpose",
+                "algo_version": CP_VERSION,
+                "model_type": MODEL_TYPE,
+                "channels": str(CHANNELS),
+                "n_objects": n_obj,
+                "height": int(masks.shape[0]),
+                "width": int(masks.shape[1]),
+                "dtype": "int32",
+                "image": masks.astype(np.int32, copy=False).ravel(order="C").tolist(),
+            }])
             get_or_create_table(db, TABLE_MASKS, mask_record)
 
-            # --- compute cp_measure features ---
+            # features
             if n_obj < MIN_OBJECTS_TO_SAVE:
-                log_tbl.add(
-                    [
-                        {
-                            "image_filename": str(img_path),
-                            "status": "no_objects",
-                            "n_objects": n_obj,
-                        }
-                    ]
-                )
+                log_tbl.add([{
+                    "image_filename": str(img_path),
+                    "status": "no_objects",
+                    "n_objects": n_obj,
+                }])
                 print(f"- {img_path.name}: no objects")
                 continue
 
             feature_arrays: Dict[str, np.ndarray] = {}
             for _, fn in measurements.items():
-                res = fn(masks, img_f)  # (mask, image) measurements
+                res = fn(masks, img_f)
                 feature_arrays.update(res)
 
             rows = []
             for i, obj_id in enumerate(labels, start=0):
-                row = {
-                    "image_filename": img_path.name,
-                    "nuclei_object_number": int(obj_id),
-                }
+                row = {"image_filename": img_path.name, "nuclei_object_number": int(obj_id)}
                 for feat_name, arr in feature_arrays.items():
                     if i < len(arr):
                         val = arr[i]
-                        # ensure python scalar
                         try:
-                            row[feat_name] = (
-                                float(val)
-                                if np.ndim(val) == 0
-                                else float(np.array(val).item())
-                            )
+                            row[feat_name] = float(val) if np.ndim(val) == 0 else float(np.array(val).item())
                         except Exception:
                             row[feat_name] = float("nan")
                 rows.append(row)
-
             df_features = pd.DataFrame(rows)
-
             get_or_create_table(db, TABLE_FEATURES, df_features)
 
             log_tbl.add([{"image": str(img_path), "status": "ok", "n_objects": n_obj}])
             print(f"✓ {img_path.name}: {n_obj} objects")
 
         except Exception as ex:
-            log_tbl.add(
-                [
-                    {
-                        "image": str(img_path),
-                        "status": f"error: {type(ex).__name__}: {ex}",
-                        "n_objects": 0,
-                    }
-                ]
-            )
+            log_tbl.add([{
+                "image": str(img_path),
+                "status": f"error: {type(ex).__name__}: {ex}",
+                "n_objects": 0,
+            }])
             print(f"✗ {img_path.name}: {ex}")
 
 
@@ -390,7 +335,7 @@ def main() -> None:  # noqa: PLR0915, C901
 
 # %%time
 # run the pipeline and show the time duration
-main()
+gather_profiles()
 
 db = lancedb.connect(LANCE_DIR)
 db.table_names()
@@ -404,15 +349,7 @@ db.open_table("images").to_pandas()
 # show the images table
 db.open_table("masks").to_pandas()
 
-# Iterate through the records and display the images
-for index, row in db.open_table("images").to_pandas().iterrows():
-    img_array = np.array(row["image"], dtype=row["dtype"]).reshape(
-        row["height"], row["width"], row["channels"]
-    )
-    plt.imshow(img_array.squeeze(), cmap="gray")
-    plt.title(f"Image: {row['filename']}")
-    plt.axis("off")
-    plt.show()
+show_images_from_lance(db_path=LANCE_DIR, table_name="images", col_name="ome-arrow_original", max_images=4, pick="first", cmap="gray")
 
 for _, row in db.open_table("masks").to_pandas().iterrows():
     mask = np.array(row["image"], dtype=np.int32).reshape(row["height"], row["width"])

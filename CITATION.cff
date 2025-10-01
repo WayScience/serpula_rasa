@@ -11,6 +11,15 @@ authors:
   - given-names: Dave
     family-names: Bunten
     orcid: "https://orcid.org/0000-0001-6041-3665"
+  - given-names: Michael
+    family-names: Lippincott
+    orcid: 'https://orcid.org/0000-0002-8637-1448'
+  - given-names: Jenna
+    family-names: Tomkinson
+    orcid: 'https://orcid.org/0000-0003-2676-5813'
+  - given-names: Gregory
+    family-names: Way
+    orcid: 'https://orcid.org/0000-0002-0503-9348'
 repository-code: "https://github.com/d33bs/serpula_rasa"
 abstract: >-
   Blank snake implementation prototype for image-based single-cell profiling

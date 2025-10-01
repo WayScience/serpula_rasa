@@ -3,7 +3,8 @@ Image utility functions.
 """
 
 from __future__ import annotations
-
+import imageio.v3 as iio
+from typing import Literal
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import pathlib
@@ -18,7 +19,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from serpula_rasa.meta import OME_ARROW_SCHEMA, OME_DTYPE_MAP, OME_ARROW_TAG_TYPE, OME_ARROW_TAG_VERSION
+from serpula_rasa.meta import OME_ARROW_SCHEMA, OME_DTYPE_MAP, OME_ARROW_TAG_TYPE, OME_ARROW_TAG_VERSION, ome_arrow_schema
 
 @dataclass
 class ChannelMeta:
@@ -85,6 +86,7 @@ def _coerce_pixel_dtype(arr5: np.ndarray) -> Tuple[np.ndarray, str]:
 def make_ome_arrow_row(
     *,
     image_id: str,
+    col_name: str = "ome_arrow",
     name: str,
     pixels: np.ndarray,                 # XY or XYZ (+ optional C/T)
     channel_meta: Optional[Sequence[ChannelMeta]] = None,
@@ -150,7 +152,7 @@ def make_ome_arrow_row(
     }
 
     return {
-        "ome_arrow": {
+        col_name: {
             "type": OME_ARROW_TAG_TYPE,
             "version": OME_ARROW_TAG_VERSION,
             "id": image_id,
@@ -163,14 +165,12 @@ def make_ome_arrow_row(
     }
 
 
-def validate_ome_arrow_table(table: pa.Table) -> None:
-    """
-    Validate the table matches OME_ARROW_SCHEMA and rows carry the correct tags.
-    Raises ValueError on mismatch.
-    """
-    if table.schema.types != OME_ARROW_SCHEMA.types or table.schema.names != OME_ARROW_SCHEMA.names:
-        raise ValueError("Schema mismatch: table does not match OME_ARROW_SCHEMA.")
-    col = table["ome_arrow"]
+def validate_ome_arrow_table(table: pa.Table, *, col_name: str = "ome_arrow") -> None:
+    """Validate schema + tags for the chosen column name."""
+    expected = ome_arrow_schema(col_name)
+    if table.schema.types != expected.types or table.schema.names != expected.names:
+        raise ValueError(f"Schema mismatch: table does not match ome_arrow_schema({col_name!r}).")
+    col = table[col_name]
     for i in range(len(col)):
         rec = col[i].as_py()
         if rec.get("type") != OME_ARROW_TAG_TYPE:
@@ -182,27 +182,25 @@ def validate_ome_arrow_table(table: pa.Table) -> None:
 def write_ome_arrow_parquet(
     rows: Iterable[Mapping[str, object]],
     path: str,
+    *,
+    col_name: str = "ome_arrow",
     row_group_size: int = 1,
 ) -> None:
-    """
-    Write ome-arrow rows to Parquet with settings tuned for numeric arrays.
-    """
-    table = pa.Table.from_pylist(list(rows), schema=OME_ARROW_SCHEMA)
+    table = pa.Table.from_pylist(list(rows), schema=ome_arrow_schema(col_name))
     pq.write_table(
         table,
         path,
         compression="zstd",
         use_dictionary=False,
         data_page_version="2.0",
-        row_group_size=row_group_size,  # often 1 row = 1 image; batch if desired
+        row_group_size=row_group_size,
     )
 
 
-def read_ome_arrow_first(path: str) -> Mapping[str, object]:
-    """Quick peek: load the first ome-arrow record (no reshaping)."""
-    tbl = pq.read_table(path, columns=["ome_arrow"])
-    validate_ome_arrow_table(tbl)
-    return tbl["ome_arrow"][0].as_py()
+def read_ome_arrow_first(path: str, *, col_name: str = "ome_arrow") -> Mapping[str, object]:
+    tbl = pq.read_table(path, columns=[col_name])
+    validate_ome_arrow_table(tbl, col_name=col_name)
+    return tbl[col_name][0].as_py()
 
 
 
@@ -267,34 +265,24 @@ def list_images(root: pathlib.Path) -> list[pathlib.Path]:
     return sorted([p for p in pathlib.Path(root).rglob("*") if p.suffix.lower() in exts])
 
 
-def pa_table_from_ome_arrow_rows(rows: list[Mapping[str, Any]]) -> pa.Table:
-    """
-    Build a PyArrow Table with the canonical one-column ome-arrow schema
-    from a list of py-dicts produced by `make_ome_arrow_row`.
-    """
-    return pa.Table.from_pylist(rows, schema=OME_ARROW_SCHEMA)
+def pa_table_from_ome_arrow_rows(rows: list[Mapping[str, Any]], *, col_name: str = "ome_arrow") -> pa.Table:
+    """Create a PyArrow table for ome-arrow rows under a custom column name."""
+    return pa.Table.from_pylist(rows, schema=ome_arrow_schema(col_name))
 
 def _lance_get_or_create_arrow_table(
     db: lancedb.db.LanceDBConnection,
     table_name: str,
     first_batch: pa.Table,
 ) -> lancedb.table.LanceTable:
-    """
-    Create (empty) or open a Lance table using the batch schema.
-    NOTE: We do NOT write 'first_batch' here to avoid double-insert.
-    """
+    # unchanged logic; first_batch already has the custom schema/col_name
     names = set(db.table_names())
     if table_name not in names:
-        # Create EMPTY table with the schema of first_batch
         return db.create_table(table_name, schema=first_batch.schema)
-
     tbl = db.open_table(table_name)
     try:
-        # Probe compatibility
         tbl.add(first_batch.slice(0, 0))
         return tbl
     except Exception:
-        # Recreate EMPTY table with the schema
         db.drop_table(table_name)
         return db.create_table(table_name, schema=first_batch.schema)
     
@@ -302,6 +290,7 @@ def ingest_ome_arrow_to_lance(
     image_paths: Iterable[pathlib.Path],
     db_path: pathlib.Path,
     table_name: str = "ome_images",
+    col_name: str = "ome_arrow",
     *,
     channel_meta: Optional[Sequence["ChannelMeta"]] = None,
     physical_size_xy_um: float = 0.108,
@@ -343,10 +332,9 @@ def ingest_ome_arrow_to_lance(
         nonlocal rows, lance_tbl
         if not rows:
             return
-        batch = pa_table_from_ome_arrow_rows(rows)
+        batch = pa_table_from_ome_arrow_rows(rows, col_name=col_name)
         if lance_tbl is None:
             lance_tbl = _lance_get_or_create_arrow_table(db, table_name, batch)
-        # Write the batch ONCE
         lance_tbl.add(batch)
         rows = []
 
@@ -356,6 +344,7 @@ def ingest_ome_arrow_to_lance(
         # Build one ome-arrow row (auto normalizes shapes to T,C,Z,Y,X)
         row = make_ome_arrow_row(
             image_id=p.stem,
+            col_name=col_name,
             name=p.name,
             pixels=img,
             channel_meta=channel_meta,
@@ -375,8 +364,9 @@ def ingest_ome_arrow_to_lance(
     return lance_tbl
 
 def show_images_from_lance(
-    db_path: Path,
+    db_path: pathlib.Path,
     table_name: str = "ome_images",
+    col_name: str = "ome_arrow",
     *,
     max_images: int = 8,
     pick: Literal["first", "center", "maxproj"] = "first",
@@ -406,11 +396,9 @@ def show_images_from_lance(
 
     db = lancedb.connect(str(db_path))
     tbl = db.open_table(table_name)
+    arr_tbl = tbl.to_arrow().select([col_name])  # <-- select by your name
+    records = [arr_tbl[col_name][i].as_py() for i in range(len(arr_tbl))]
 
-    # Pull to Arrow (fast) then to Py-land recordss
-    # Note: select only the ome_arrow column
-    arr_tbl = tbl.to_arrow().select(["ome_arrow"])
-    records = [arr_tbl["ome_arrow"][i].as_py() for i in range(len(arr_tbl))]
     if not records:
         print("(no images)")
         return
@@ -448,3 +436,68 @@ def show_images_from_lance(
 
     plt.tight_layout()
     plt.show()
+
+def pa_table_from_ome_rows(rows: List[Mapping[str, Any]], col_name: str = "ome_arrow") -> pa.Table:
+    """Build a PyArrow Table from ome-arrow rows using the canonical schema."""
+    return  pa.Table.from_pylist(list(rows), schema=ome_arrow_schema(col_name))
+
+def ingest_ome_images_ome_arrow(
+    db: lancedb.db.LanceDBConnection,
+    table_name: str,
+    image_paths: Sequence[pathlib.Path],
+    *,
+    col_name: str = "ome_arrow",
+    physical_size_xy_um: float = 0.108,
+    physical_size_z_um: float = 1.0,
+    physical_unit: str = "µm",
+    prefer_dimension_order_xyzct: bool = False,  # 2D → "XYCT" hint
+    batch_size: int = 64,
+    channel_meta: Optional[Sequence["ChannelMeta"]] = None,  # optional
+) -> lancedb.table.LanceTable:
+    """
+    Convert file images into `ome_arrow` structs and write to a Lance table
+    (one struct per row) using the canonical Arrow schema.
+    """
+    rows: List[Mapping[str, Any]] = []
+    lance_tbl: Optional[lancedb.table.LanceTable] = None
+
+    def _flush() -> None:
+        nonlocal rows, lance_tbl
+        if not rows:
+            return
+        batch = pa_table_from_ome_rows(rows=rows, col_name=col_name)
+        if lance_tbl is None:
+            lance_tbl = _lance_get_or_create_arrow_table(db, table_name, batch)
+        lance_tbl.add(batch)   # write the batch once
+        rows = []
+
+    for p in image_paths:
+        arr = iio.imread(p)  # keeps dtype; supports many formats
+
+        # If multichannel (H,W,C), pick first channel for nuclei (demo parity)
+        if arr.ndim == 3 and arr.shape[-1] in (2, 3, 4):
+            arr = arr[..., 0]
+
+        row = make_ome_arrow_row(
+            image_id=p.stem,
+            col_name=col_name,
+            name=p.name,
+            pixels=arr,
+            channel_meta=channel_meta,
+            physical_size_xy_um=physical_size_xy_um,
+            physical_size_z_um=physical_size_z_um,
+            physical_unit=physical_unit,
+            prefer_dimension_order_xyzct=prefer_dimension_order_xyzct,
+            acquisition_dt=datetime.now(timezone.utc),
+        )
+        rows.append(row)
+
+        if len(rows) >= batch_size:
+            _flush()
+
+    _flush()
+
+    if lance_tbl is None:
+        raise("No images ingested; check `image_paths`.")
+    
+    return lance_tbl

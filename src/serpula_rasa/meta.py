@@ -90,7 +90,15 @@ OME_ARROW_STRUCT: pa.StructType = pa.struct(
     ]
 )
 
-# OME_ARROW_SCHEMA: a one-column table named 'ome_arrow' holding the struct.
+def ome_arrow_schema(col_name: str = "ome_arrow") -> pa.Schema:
+    """
+    Build a one-column Arrow schema for ome-arrow with a custom column name.
+    Reuses the struct type from the canonical OME_ARROW_SCHEMA.
+    """
+    struct_type = OME_ARROW_SCHEMA.field(0).type  # reuse the canonical struct
+    
+    return pa.schema([pa.field(col_name, struct_type)])
+
 OME_ARROW_SCHEMA: pa.Schema = pa.schema([pa.field("ome_arrow", OME_ARROW_STRUCT)])
 
 

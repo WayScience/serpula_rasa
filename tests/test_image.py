@@ -46,6 +46,7 @@ def test_ome_arrow_roundtrip_from_2d_tiff(tmp_path, shape, dtype):
 
     row = make_ome_arrow_row(
         image_id="img_0001",
+        col_name="ome_arrow",
         name="2D TIFF example",
         pixels=img,                       # accepts (Y, X)
         physical_size_xy_um=0.108,
