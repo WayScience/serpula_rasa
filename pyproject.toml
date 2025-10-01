@@ -40,6 +40,9 @@ version_scheme = "no-guess-dev"
 local_scheme = "no-local-version"
 version_file = "src/serpula_rasa/_version.py"
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 88
@@ -88,3 +91,8 @@ formats = "ipynb,py:light"
 [tool.vulture]
 min_confidence = 90
 paths = [ "src/serpula_rasa" ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+]
