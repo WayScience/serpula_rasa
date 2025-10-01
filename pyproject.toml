@@ -34,14 +34,19 @@ dependencies = [
   "scikit-image>=0.24",
 ]
 
+[dependency-groups]
+dev = [
+  "pytest>=8.4.2",
+]
+
+[tool.setuptools.packages.find]
+where = [ "src" ]
+
 [tool.setuptools_scm]
 root = "."
 version_scheme = "no-guess-dev"
 local_scheme = "no-local-version"
 version_file = "src/serpula_rasa/_version.py"
-
-[tool.setuptools.packages.find]
-where = ["src"]
 
 [tool.ruff]
 target-version = "py311"
@@ -72,6 +77,8 @@ lint.select = [
 ]
 lint.per-file-ignores."src/serpula_rasa/example.ipynb" = [ "PLR2004", "RUF059" ]
 lint.per-file-ignores."src/serpula_rasa/example.py" = [ "PLR2004", "RUF059" ]
+lint.per-file-ignores."src/serpula_rasa/image.py" = [ "PLR2004", "RUF059" ]
+lint.per-file-ignores."tests/*" = [ "ANN001", "ANN201", "PLR2004" ]
 
 [tool.pytest.ini_options]
 pythonpath = [ "." ]
@@ -91,8 +98,3 @@ formats = "ipynb,py:light"
 [tool.vulture]
 min_confidence = 90
 paths = [ "src/serpula_rasa" ]
-
-[dependency-groups]
-dev = [
-    "pytest>=8.4.2",
-]

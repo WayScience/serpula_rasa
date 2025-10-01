@@ -2,24 +2,25 @@
 Tests for ome-arrow work
 """
 
+from pathlib import Path
+
+import matplotlib
 import numpy as np
-import tifffile as tiff
 import pyarrow.parquet as pq
 import pytest
-import matplotlib
-
 import tifffile as tiff
 
 # import your ome-arrow helpers/globals
 from serpula_rasa.image import (
-    make_ome_arrow_row,
-    write_ome_arrow_parquet,
-    validate_ome_arrow_table,
-    reconstruct_tczyx_from_record,
     ingest_ome_arrow_to_lance,
+    make_ome_arrow_row,
+    reconstruct_tczyx_from_record,
     show_images_from_lance,
+    validate_ome_arrow_table,
+    write_ome_arrow_parquet,
 )
 from serpula_rasa.meta import OME_ARROW_TAG_TYPE, OME_ARROW_TAG_VERSION
+from tests.utils import write_synth_tiff
 
 matplotlib.use("Agg")
 
@@ -35,7 +36,9 @@ def test_ome_arrow_roundtrip_from_2d_tiff(tmp_path, shape, dtype):
       5) reconstruct array and compare with source
     """
     # 1) synthesize and save a 2D TIFF
-    src = (np.arange(shape[0] * shape[1], dtype=np.uint32) % np.iinfo(dtype).max).astype(dtype)
+    src = (
+        np.arange(shape[0] * shape[1], dtype=np.uint32) % np.iinfo(dtype).max
+    ).astype(dtype)
     src = src.reshape(shape)  # (Y, X)
     tiff_path = tmp_path / "img.tif"
     tiff.imwrite(tiff_path, src)
@@ -48,7 +51,7 @@ def test_ome_arrow_roundtrip_from_2d_tiff(tmp_path, shape, dtype):
         image_id="img_0001",
         col_name="ome_arrow",
         name="2D TIFF example",
-        pixels=img,                       # accepts (Y, X)
+        pixels=img,  # accepts (Y, X)
         physical_size_xy_um=0.108,
         physical_size_z_um=1.0,
         physical_unit="µm",
@@ -89,15 +92,8 @@ def test_ome_arrow_roundtrip_from_2d_tiff(tmp_path, shape, dtype):
     assert float(recon.mean()) == pytest.approx(float(src.mean()))
     assert float(recon.max()) == float(src.max())
 
+
 # test_ome_arrow_lance_ingest.py
-import os
-import sys
-from pathlib import Path
-
-import numpy as np
-import pytest
-
-from tests.utils import write_synth_tiff
 
 
 def test_ingest_ome_arrow_to_lance_roundtrip(tmp_db: Path, tmp_path: Path):
@@ -110,7 +106,7 @@ def test_ingest_ome_arrow_to_lance_roundtrip(tmp_db: Path, tmp_path: Path):
         image_paths=[tmp_path / "a.tif", tmp_path / "b.tif"],
         db_path=tmp_db,
         table_name="ome_images",
-        prefer_dimension_order_xyzct=False,   # 2D → "XYCT" hint
+        prefer_dimension_order_xyzct=False,  # 2D → "XYCT" hint
         batch_size=2,
     )
 
@@ -143,6 +139,7 @@ def test_ingest_ome_arrow_to_lance_roundtrip(tmp_db: Path, tmp_path: Path):
     for rec in records:
         assert rec["type"] == OME_ARROW_TAG_TYPE
         assert rec["version"] == OME_ARROW_TAG_VERSION
+
 
 def test_show_images_from_lance_smoke(tmp_db: Path, tmp_path: Path):
     """

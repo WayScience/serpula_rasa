@@ -3,7 +3,9 @@ Fixtures for image tests.
 """
 
 import pathlib
+
 import pytest
+
 
 @pytest.fixture
 def tmp_db(tmp_path: pathlib.Path) -> pathlib.Path:

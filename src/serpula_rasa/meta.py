@@ -46,14 +46,14 @@ OME_ARROW_STRUCT: pa.StructType = pa.struct(
                     pa.field("physical_size_x_unit", pa.string()),  # usually "µm"
                     pa.field("physical_size_y_unit", pa.string()),
                     pa.field("physical_size_z_unit", pa.string()),
-                    
                     pa.field(
                         "channels",
                         pa.list_(
                             # CHANNELS: one entry per channel (e.g., DNA, Mito, ER).
-                            #  - emission_um / excitation_um: wavelengths (micrometers) for context.
+                            #  - emission_um / excitation_um: wavelengths (micrometers).
                             #  - illumination: modality (e.g., "Epifluorescence").
-                            #  - color_rgba: preferred display color (packed 0xRRGGBBAA).
+                            #  - color_rgba: preferred display color
+                            #       (packed 0xRRGGBBAA).
                             pa.struct(
                                 [
                                     pa.field("id", pa.string()),
@@ -90,14 +90,16 @@ OME_ARROW_STRUCT: pa.StructType = pa.struct(
     ]
 )
 
+
 def ome_arrow_schema(col_name: str = "ome_arrow") -> pa.Schema:
     """
     Build a one-column Arrow schema for ome-arrow with a custom column name.
     Reuses the struct type from the canonical OME_ARROW_SCHEMA.
     """
     struct_type = OME_ARROW_SCHEMA.field(0).type  # reuse the canonical struct
-    
+
     return pa.schema([pa.field(col_name, struct_type)])
+
 
 OME_ARROW_SCHEMA: pa.Schema = pa.schema([pa.field("ome_arrow", OME_ARROW_STRUCT)])
 
