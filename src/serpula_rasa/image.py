@@ -371,6 +371,8 @@ def show_images_from_lance(
     max_images: int = 8,
     pick: Literal["first", "center", "maxproj"] = "first",
     cmap: str = "gray",
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
 ) -> None:
     """
     Display images stored as `ome_arrow` records in a LanceDB table.
@@ -426,7 +428,7 @@ def show_images_from_lance(
             else:
                 plane = img[0]
 
-        ax.imshow(plane, cmap=cmap)
+        ax.imshow(plane, cmap=cmap, vmin=vmin, vmax=vmax)
         ax.set_title(rec.get("name", f"record {i}"))
         ax.axis("off")
 
@@ -501,3 +503,13 @@ def ingest_ome_images_ome_arrow(
         raise("No images ingested; check `image_paths`.")
     
     return lance_tbl
+
+# --- small helper to declare a new ome-arrow column schema on the table ---
+def ensure_ome_arrow_column(tbl: lancedb.table.LanceTable, col_name: str) -> None:
+    # Reuse the struct type from your canonical OME_ARROW_SCHEMA
+    struct_type = OME_ARROW_SCHEMA.field(0).type
+    empty = pa.Table.from_pylist([], schema=pa.schema([pa.field(col_name, struct_type)]))
+    try:
+        tbl.add(empty)  # extends schema without adding rows
+    except Exception:
+        pass  # column probably exists already

@@ -33,6 +33,7 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from pprint import pp
 from shutil import copy2, copytree
@@ -44,8 +45,16 @@ import lancedb
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 from cellpose import models as cp_models
-from serpula_rasa.image import ingest_ome_images_ome_arrow, show_images_from_lance
+
+from serpula_rasa.image import (
+    ensure_ome_arrow_column,
+    ingest_ome_images_ome_arrow,
+    make_ome_arrow_row,
+    show_images_from_lance,
+)
+from serpula_rasa.meta import OME_ARROW_SCHEMA
 
 try:
     from cellpose import version as CP_VERSION
@@ -250,53 +259,92 @@ def gather_profiles() -> None:  # noqa: PLR0915, C901
     if not images:
         raise SystemExit(f"No images found under: {IMAGES_DIR.resolve()}")
 
-    ome_tbl = ingest_ome_images_ome_arrow(
-        db=db,
-        col_name="ome-arrow_original",
-        table_name=TABLE_IMAGES,            # reuse TABLE_IMAGES name
-        image_paths=images,            # demo: first image only
-        prefer_dimension_order_xyzct=False, # 2D → "XYCT" hint
-    )
-    print(f"[ome-arrow] stored {ome_tbl.count_rows()} image(s) in Lance")
+    # --- We will build both struct columns in the same index order ---
+    rows_combined = (
+        []
+    )  # each item will be {"ome-arrow_original": {...}, "ome-arrow_mask": {...}|None}
 
-    for img_path in [images[0]]:
+    for img_path in images:
         try:
+            # Load image (keep dtype); if multichannel HWC, pick channel 0 for demo parity
             img = iio.imread(img_path)
-            # match the ingestion’s channel handling
             if img.ndim == 3 and img.shape[-1] in (2, 3, 4):
                 nuc_img = img[..., 0]
             else:
                 nuc_img = img
 
-            img_f = to_float01(nuc_img)
+            # ---------- Build original image struct ----------
+            img_struct = make_ome_arrow_row(
+                image_id=img_path.stem,
+                col_name="ome-arrow_original",
+                name=img_path.name,
+                pixels=nuc_img,
+                physical_size_xy_um=0.108,
+                physical_size_z_um=1.0,
+                physical_unit="µm",
+                prefer_dimension_order_xyzct=False,  # 2D → "XYCT" hint
+                acquisition_dt=datetime.now(timezone.utc),
+            )
 
-            # segment
+            # ---------- Segment + build mask struct (same index as image) ----------
+            img_f = to_float01(nuc_img)
             masks, diams = cellpose_eval(model, img_f, channels=CHANNELS)
 
-            # store masks (kept as flattened ints in existing table)
-            labels = np.unique(masks); labels = labels[labels > 0]
+            mask_struct = make_ome_arrow_row(
+                image_id=img_path.stem,
+                col_name="ome-arrow_mask",
+                name=f"{img_path.name} (mask)",
+                pixels=masks.astype(np.uint16, copy=False),
+                physical_size_xy_um=0.108,
+                physical_size_z_um=1.0,
+                physical_unit="µm",
+                prefer_dimension_order_xyzct=False,
+                acquisition_dt=datetime.now(timezone.utc),
+            )
+
+            # Collect a single row with both structs (aligned by index)
+            rows_combined.append(
+                {
+                    "ome-arrow_original": img_struct["ome-arrow_original"],
+                    "ome-arrow_mask": mask_struct["ome-arrow_mask"],
+                }
+            )
+
+            # ---------- Optional: keep your legacy masks/features tables ----------
+            labels = np.unique(masks)
+            labels = labels[labels > 0]
             n_obj = int(labels.size)
-            mask_record = pd.DataFrame([{
-                "filename": img_path.name,
-                "algo_name": "cellpose",
-                "algo_version": CP_VERSION,
-                "model_type": MODEL_TYPE,
-                "channels": str(CHANNELS),
-                "n_objects": n_obj,
-                "height": int(masks.shape[0]),
-                "width": int(masks.shape[1]),
-                "dtype": "int32",
-                "image": masks.astype(np.int32, copy=False).ravel(order="C").tolist(),
-            }])
+
+            mask_record = pd.DataFrame(
+                [
+                    {
+                        "filename": img_path.name,
+                        "algo_name": "cellpose",
+                        "algo_version": CP_VERSION,
+                        "model_type": MODEL_TYPE,
+                        "channels": str(CHANNELS),
+                        "n_objects": n_obj,
+                        "height": int(masks.shape[0]),
+                        "width": int(masks.shape[1]),
+                        "dtype": "int32",
+                        "image": masks.astype(np.int32, copy=False)
+                        .ravel(order="C")
+                        .tolist(),
+                    }
+                ]
+            )
             get_or_create_table(db, TABLE_MASKS, mask_record)
 
-            # features
             if n_obj < MIN_OBJECTS_TO_SAVE:
-                log_tbl.add([{
-                    "image_filename": str(img_path),
-                    "status": "no_objects",
-                    "n_objects": n_obj,
-                }])
+                log_tbl.add(
+                    [
+                        {
+                            "image_filename": str(img_path),
+                            "status": "no_objects",
+                            "n_objects": n_obj,
+                        }
+                    ]
+                )
                 print(f"- {img_path.name}: no objects")
                 continue
 
@@ -307,12 +355,19 @@ def gather_profiles() -> None:  # noqa: PLR0915, C901
 
             rows = []
             for i, obj_id in enumerate(labels, start=0):
-                row = {"image_filename": img_path.name, "nuclei_object_number": int(obj_id)}
+                row = {
+                    "image_filename": img_path.name,
+                    "nuclei_object_number": int(obj_id),
+                }
                 for feat_name, arr in feature_arrays.items():
                     if i < len(arr):
                         val = arr[i]
                         try:
-                            row[feat_name] = float(val) if np.ndim(val) == 0 else float(np.array(val).item())
+                            row[feat_name] = (
+                                float(val)
+                                if np.ndim(val) == 0
+                                else float(np.array(val).item())
+                            )
                         except Exception:
                             row[feat_name] = float("nan")
                 rows.append(row)
@@ -323,12 +378,45 @@ def gather_profiles() -> None:  # noqa: PLR0915, C901
             print(f"✓ {img_path.name}: {n_obj} objects")
 
         except Exception as ex:
-            log_tbl.add([{
-                "image": str(img_path),
-                "status": f"error: {type(ex).__name__}: {ex}",
-                "n_objects": 0,
-            }])
+            # If segmentation or anything else fails, still store original image row with mask=None
+            try:
+                if "img_struct" in locals():
+                    rows_combined.append(
+                        {
+                            "ome-arrow_original": img_struct["ome-arrow_original"],
+                            "ome-arrow_mask": None,  # nullable struct column will accept None
+                        }
+                    )
+            except Exception:
+                pass
+
+            log_tbl.add(
+                [
+                    {
+                        "image": str(img_path),
+                        "status": f"error: {type(ex).__name__}: {ex}",
+                        "n_objects": 0,
+                    }
+                ]
+            )
             print(f"✗ {img_path.name}: {ex}")
+
+    # ---------- Materialize a two-column Arrow table (index-aligned) ----------
+    # Reuse the canonical ome-arrow struct type for both columns.
+    struct_type = OME_ARROW_SCHEMA.field(0).type
+    schema_two_cols = pa.schema(
+        [
+            pa.field("ome-arrow_original", struct_type),  # nullable defaults to True
+            pa.field("ome-arrow_mask", struct_type),
+        ]
+    )
+    arrow_tbl = pa.Table.from_pylist(rows_combined, schema=schema_two_cols)
+
+    # ---------- Create/replace Lance table with both columns ----------
+    if TABLE_IMAGES in set(db.table_names()):
+        db.drop_table(TABLE_IMAGES)
+    img_tbl = db.create_table(TABLE_IMAGES, data=arrow_tbl)
+    print(f"[ome-arrow] stored {img_tbl.count_rows()} row(s) in Lance (images + masks)")
 
 
 # -
@@ -341,19 +429,32 @@ db = lancedb.connect(LANCE_DIR)
 db.table_names()
 
 # show nuclei features
+db.open_table("run_log").to_pandas().iloc[0].to_dict()
+
+# show nuclei features
 db.open_table("compartment_nuclei").to_pandas()
+
+db.open_table("compartment_nuclei").to_pandas().iloc[0].to_dict()
 
 # show the images table
 db.open_table("images").to_pandas()
 
-# show the images table
-db.open_table("masks").to_pandas()
+show_images_from_lance(
+    db_path=LANCE_DIR,
+    table_name="images",
+    col_name="ome-arrow_original",
+    max_images=4,
+    pick="first",
+    cmap="gray",
+)
 
-show_images_from_lance(db_path=LANCE_DIR, table_name="images", col_name="ome-arrow_original", max_images=4, pick="first", cmap="gray")
-
-for _, row in db.open_table("masks").to_pandas().iterrows():
-    mask = np.array(row["image"], dtype=np.int32).reshape(row["height"], row["width"])
-    plt.imshow(mask, cmap="gray", vmin=0, vmax=1)
-    plt.title(f"Mask ({row['algo_name']} {row['algo_version']}): {row['filename']}")
-    plt.axis("off")
-    plt.show()
+show_images_from_lance(
+    db_path=LANCE_DIR,
+    table_name="images",
+    col_name="ome-arrow_mask",
+    max_images=4,
+    pick="first",
+    cmap="gray",
+    vmin=0,
+    vmax=1,
+)
